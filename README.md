@@ -206,5 +206,5 @@ index.html.bak.2025-12-27-154233
 
 ## ✍️ Author
 
-**Sandeep Bandela**
-Linux • Ansible • Automation • Infrastructure Engineering
+**Sandeep Reddy Bandela**
+* Linux • Ansible • Automation • Infrastructure Engineering
