@@ -1,0 +1,246 @@
+---
+- name: Apache HTTP Installation on RedHat family and Debian family
+  hosts: '*'
+  become: true
+  become_method: "{{ play_become_method }}"
+  become_user: root
+  gather_facts: true
+
+  vars:
+    ansible_remote_tmp: /tmp
+
+  tasks:
+    - name: Install Apache HTTP on RedHat family
+      block:
+        - name: Refresh yum cache
+          ansible.builtin.yum:
+            update_cache: true
+          when: ansible_distribution_major_version | int < 8  
+        
+        - name: Refresh dnf cache
+          ansible.builtin.dnf:
+            update_cache: true
+          when: ansible_distribution_major_version | int >= 8
+
+        - name: Install httpd package
+          ansible.builtin.yum:
+            name: httpd
+            state: present
+          when: ansible_distribution_major_version | int < 8 
+
+        - name: Install httpd package using dnf
+          ansible.builtin.dnf:
+            name: httpd
+            state: present
+          when: ansible_distribution_major_version | int >= 8
+
+        - name: Ensure mod_ssl and openssl are installed
+          ansible.builtin.yum:
+            name:
+              - mod_ssl
+              - openssl
+            state: present
+          when: ansible_distribution_major_version | int < 8
+
+        - name: Ensure mod_ssl and openssl are installed using dnf
+          ansible.builtin.dnf:
+            name:
+              - mod_ssl
+              - openssl
+            state: present
+          when: ansible_distribution_major_version | int >= 8
+
+        - name: Check certificate and key presense
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          register: rhel_tls_stat
+          loop:
+            - /etc/pki/tls/certs/localhost.crt
+            - /etc/pki/tls/private/localhost.key
+          
+        - name: Generate self-signed certificate if not present
+          ansible.builtin.command: >
+            openssl req  -x509 -nodes -days 365
+            -newkey rsa:2048
+            -keyout /etc/pki/tls/private/localhost.key
+            -out /etc/pki/tls/certs/localhost.crt
+            -subj "/C=IN/ST=Telangana/L=Hyderabad/O=Sandeep/CN={{ ansible_fqdn | default(ansible_hostname) }}"
+          args:
+            creates: /etc/pki/tls/certs/localhost.crt
+          when: >
+            (rhel_tls_stat.results | selectattr('stat.exists', 'equalto', false) | list | length) > 0
+            or
+            (rhel_tls_stat.results | map(attribute='stat') | map(attribute='size') | list | min | default(0) == 0)
+
+        - name: Set permissions on TLS key and certificate
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            mode: "{{ item.mode }}"
+            owner: root
+            group: root
+          loop: 
+            - { path: "/etc/pki/tls/private/localhost.key", mode: "0600" }
+            - { path: "/etc/pki/tls/certs/localhost.crt", mode: "0644" }
+
+        - name: Check if index.html exists
+          ansible.builtin.stat:
+            path: /var/www/html/index.html
+          register: index_html
+          changed_when: false
+
+        - name: Compute timestamp for backup filename
+          ansible.builtin.set_fact:
+            index_backup_suffix: "{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+
+        - name: Backup existing index.html
+          ansible.builtin.command: >
+            mv /var/www/html/index.html
+               /var/www/html/index.html.bak.{{ index_backup_suffix }}
+          when: index_html.stat.exists | default(false)
+
+        - name: Deploy sample index.html
+          ansible.builtin.copy:
+            src: index.html
+            dest: /var/www/html/index.html
+            mode: '0644'
+
+        - name: Check httpd binary is present in PATH
+          ansible.builtin.command: which httpd
+          register: httpd_bin 
+          changed_when: false
+
+        - name: Assert httpd binary presence
+          ansible.builtin.assert:
+            that:
+              - httpd_bin.rc == 0
+            fail_msg: "httpd binary not found in PATH, installation might have failed." 
+
+        - name: Validate httpd configuration
+          ansible.builtin.command: httpd -t
+          register: httpd_t
+          changed_when: false
+
+        - name: Show httpd config test output
+          ansible.builtin.debug:
+            var: httpd_t.stdout_lines
+
+        - name: Remove stale PID file if exists
+          ansible.builtin.file:
+            path: /var/run/httpd/httpd.pid
+            state: absent
+        
+        - name: Enable and start httpd service
+          ansible.builtin.service:
+            name: httpd
+            enabled: true
+            state: started  
+
+        - name: wait for port 80 to be open
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 80
+            delay: 1
+            timeout: 30
+
+        - name: Verify httpd HTTP response 
+          ansible.builtin.uri:
+            url: http://127.0.0.1/
+            method: HEAD
+            status_code: 200
+          register: httpd_http
+
+        - name: Show httpd HTTP response
+          ansible.builtin.debug:
+            msg: |
+              ===== APACHE2 HTTP RESPONSE =====
+              URL: {{ httpd_http.url | default('N/A') }}
+              Status: {{ httpd_http.status }}
+              Elapsed: {{ httpd_http.elapsed | default('N/A') }}
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Apache HTTP on Debian family
+      block:
+        - name: Refresh apt cache
+          ansible.builtin.apt:
+            update_cache: true  
+
+        - name: Install apache2 package
+          ansible.builtin.apt:
+            name: apache2
+            state: present
+
+        - name: Check if index.html exists
+          ansible.builtin.stat:
+            path: /var/www/html/index.html
+          register: index_stat
+
+        - name: Compute timestamp for backup filename
+          ansible.builtin.set_fact:
+            index_backup_suffix: "{{ ansible_date_time.date }}-{{ ansible_date_time.hour }}{{ ansible_date_time.minute }}{{ ansible_date_time.second }}"
+
+        - name: Backup existing index.html
+          ansible.builtin.command: >
+            mv /var/www/html/index.html
+               /var/www/html/index.html.bak.{{ index_backup_suffix }}
+          when: index_stat.stat.exists | default(false)
+
+        - name: Deploy sample index.html
+          ansible.builtin.copy:
+            src: index.html
+            dest: /var/www/html/
+            mode: '0644' 
+
+        - name: Check apache2ctl is present in PATH
+          ansible.builtin.command: which apache2ctl
+          register: apache2ctl_bin 
+          changed_when: false
+
+        - name: Assert apache2ctl binary presence
+          ansible.builtin.assert:
+            that:
+              - apache2ctl_bin.rc == 0
+            fail_msg: "apache2ctl binary not found in PATH, installation might have failed."
+
+        - name: Validate apache2 configuration
+          ansible.builtin.command: apache2ctl -t
+          register: apache2_t
+          changed_when: false
+
+        - name: Show apache2 config test output
+          ansible.builtin.debug:
+            var: apache2_t.stdout_lines
+
+        - name: Remove stale PID file if exists
+          ansible.builtin.file: 
+            path: /var/run/apache2/apache2.pid
+            state: absent
+
+        - name: Enable and start apache2 service
+          ansible.builtin.service:
+            name: apache2
+            enabled: true
+            state: started
+
+        - name: wait for port 80 to be open
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: 80
+            delay: 1
+            timeout: 30
+
+        - name: Verify apache2 HTTP response 
+          ansible.builtin.uri:
+            url: http://127.0.0.1/
+            method: HEAD
+            status_code: 200
+          register: apache2_http
+
+        - name: Show apache2 HTTP response
+          ansible.builtin.debug:
+            msg: |
+              ===== APACHE2 HTTP RESPONSE =====
+              URL: {{ apache2_http.url | default('N/A') }}
+              Status: {{ apache2_http.status }}
+              Elapsed: {{ apache2_http.elapsed | default('N/A') }}
+      when: ansible_os_family == "Debian"
+        
